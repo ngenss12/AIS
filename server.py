@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
@@ -15,7 +16,6 @@ REGIONS = [
     [[-8.0, 112.0], [-6.5, 113.5]],   # Perairan Surabaya
 ]
 
-app = FastAPI()
 clients: set[WebSocket] = set()
 
 
@@ -73,7 +73,12 @@ async def ais_stream():
     uri = "wss://stream.aisstream.io/v0/stream"
     while True:
         try:
-            async with websockets.connect(uri) as ws:
+            async with websockets.connect(
+                uri,
+                ping_interval=30,   # kirim ping tiap 30 detik
+                ping_timeout=60,    # tunggu pong max 60 detik
+                close_timeout=10,
+            ) as ws:
                 await ws.send(json.dumps({
                     "APIKey": API_KEY,
                     "BoundingBoxes": REGIONS,
@@ -84,24 +89,46 @@ async def ais_stream():
                     data = parse(json.loads(raw))
                     if data:
                         await broadcast(data)
+            print("⚠️  Koneksi AIS ditutup server — reconnect...")
+        except websockets.exceptions.ConnectionClosedError as e:
+            print(f"⚠️  Koneksi AIS terputus ({e.code}) — reconnect 5s...")
         except Exception as e:
-            print(f"❌ AIS error: {e} — reconnect 5s...")
-            await asyncio.sleep(5)
+            print(f"❌ AIS error: {type(e).__name__}: {e} — reconnect 5s...")
+        await asyncio.sleep(5)
 
 
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(ais_stream())
+async def browser_keepalive(websocket: WebSocket):
+    """Kirim ping ke browser tiap 20 detik agar koneksi tidak timeout."""
+    try:
+        while True:
+            await asyncio.sleep(20)
+            await websocket.send_text(json.dumps({"type": "ping"}))
+    except Exception:
+        pass
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    task = asyncio.create_task(ais_stream())
+    yield
+    task.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
     clients.add(websocket)
+    ping_task = asyncio.create_task(browser_keepalive(websocket))
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
+        ping_task.cancel()
         clients.discard(websocket)
 
 
