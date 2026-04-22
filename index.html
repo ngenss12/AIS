@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <title>AIS Indonesia — Realtime</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0d1117; font-family: 'Segoe UI', sans-serif; color: #cdd9e5; }
+    #map { width: 100vw; height: 100vh; }
+
+    #topbar {
+      position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 12px; align-items: center;
+      background: rgba(13,17,23,0.85);
+      border: 1px solid #30363d;
+      padding: 7px 18px; border-radius: 999px;
+      font-size: 13px; z-index: 1000;
+      backdrop-filter: blur(6px);
+    }
+    #topbar .sep { color: #444; }
+    #dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #f85149; display: inline-block; margin-right: 5px;
+      transition: background .3s;
+    }
+    #dot.on { background: #3fb950; animation: blink 1.4s infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+    #legend {
+      position: fixed; bottom: 20px; left: 14px;
+      background: rgba(13,17,23,0.85);
+      border: 1px solid #30363d;
+      padding: 10px 14px; border-radius: 10px;
+      font-size: 12px; z-index: 1000;
+      backdrop-filter: blur(6px);
+      line-height: 1.8;
+    }
+    #legend b { display: block; margin-bottom: 4px; font-size: 13px; }
+    .dot-red    { color: #f85149; }
+    .dot-orange { color: #f0883e; }
+    .dot-blue   { color: #58a6ff; }
+    .dot-green  { color: #3fb950; }
+    .dot-gray   { color: #8b949e; }
+
+    .leaflet-popup-content-wrapper {
+      background: #161b22; color: #cdd9e5;
+      border: 1px solid #30363d; border-radius: 8px;
+    }
+    .leaflet-popup-tip { background: #161b22; }
+    .leaflet-popup-content { font-size: 13px; line-height: 1.7; }
+    .leaflet-popup-content b { color: #58a6ff; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="topbar">
+    <span><span id="dot"></span><span id="conn-label">Menghubungkan…</span></span>
+    <span class="sep">|</span>
+    <span>🚢 <b id="ship-count">0</b> kapal</span>
+    <span class="sep">|</span>
+    <span>📡 <b id="msg-count">0</b> pesan</span>
+    <span class="sep">|</span>
+    <span id="last-update" style="color:#8b949e">—</span>
+  </div>
+
+  <div id="legend">
+    <b>Kecepatan Kapal</b>
+    <div><span class="dot-red">▲</span> Berhenti / Jangkar (&lt;1 kn)</div>
+    <div><span class="dot-orange">▲</span> Lambat (1–5 kn)</div>
+    <div><span class="dot-blue">▲</span> Normal (5–12 kn)</div>
+    <div><span class="dot-green">▲</span> Cepat (&gt;12 kn)</div>
+    <div><span class="dot-gray">▲</span> Tidak diketahui</div>
+  </div>
+
+  <script>
+    // --- MAP INIT ---
+    const map = L.map('map', { zoomControl: false }).setView([-2.5, 117.0], 5);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
+      subdomains: 'abcd', maxZoom: 19
+    }).addTo(map);
+
+    // --- STATE ---
+    const ships = {};   // mmsi -> { marker, lastSeen }
+    let msgCount = 0;
+
+    // Remove ships not updated in 10 minutes
+    setInterval(() => {
+      const cutoff = Date.now() - 10 * 60 * 1000;
+      for (const [mmsi, s] of Object.entries(ships)) {
+        if (s.lastSeen < cutoff) {
+          map.removeLayer(s.marker);
+          delete ships[mmsi];
+        }
+      }
+      document.getElementById('ship-count').textContent = Object.keys(ships).length;
+    }, 60_000);
+
+    // --- HELPERS ---
+    function speedColor(speed) {
+      if (speed == null) return '#8b949e';
+      if (speed < 1)     return '#f85149';
+      if (speed < 5)     return '#f0883e';
+      if (speed < 12)    return '#58a6ff';
+      return '#3fb950';
+    }
+
+    function makeIcon(color, angle) {
+      const rot = (angle != null && angle < 360) ? angle : 0;
+      return L.divIcon({
+        className: '',
+        html: `<div style="
+          width:0;height:0;
+          border-left:5px solid transparent;
+          border-right:5px solid transparent;
+          border-bottom:13px solid ${color};
+          transform:rotate(${rot}deg);
+          filter:drop-shadow(0 0 4px ${color}88);
+        "></div>`,
+        iconSize: [10, 13],
+        iconAnchor: [5, 6],
+      });
+    }
+
+    function popupHTML(d) {
+      return `
+        <b>🚢 ${d.ship_name}</b><br>
+        <span style="color:#8b949e;font-size:11px">MMSI: ${d.mmsi}</span><br>
+        Kecepatan : <b>${d.speed ?? '—'} kn</b><br>
+        Course    : ${d.course ?? '—'}°<br>
+        Heading   : ${d.heading ?? '—'}°<br>
+        Tujuan    : ${d.destination || '—'}<br>
+        Status    : ${d.nav_status ?? '—'}<br>
+        <span style="color:#8b949e;font-size:11px">${d.waktu || ''}</span>
+      `;
+    }
+
+    // --- UPDATE SHIP ---
+    function updateShip(d) {
+      const { mmsi, lat, lon, heading, course, speed } = d;
+      if (!mmsi || !lat || !lon) return;
+
+      const color = speedColor(speed);
+      const angle = heading < 511 ? heading : course;
+      const icon  = makeIcon(color, angle);
+      const popup = popupHTML(d);
+
+      if (ships[mmsi]) {
+        ships[mmsi].marker.setLatLng([lat, lon]);
+        ships[mmsi].marker.setIcon(icon);
+        if (ships[mmsi].marker.isPopupOpen()) {
+          ships[mmsi].marker.getPopup().setContent(popup);
+        } else {
+          ships[mmsi].marker.bindPopup(popup);
+        }
+        ships[mmsi].lastSeen = Date.now();
+      } else {
+        const marker = L.marker([lat, lon], { icon })
+          .bindPopup(popup, { maxWidth: 240 })
+          .addTo(map);
+        ships[mmsi] = { marker, lastSeen: Date.now() };
+      }
+
+      document.getElementById('ship-count').textContent = Object.keys(ships).length;
+    }
+
+    // --- WEBSOCKET ---
+    function connect() {
+      const ws = new WebSocket(`ws://${location.host}/ws`);
+
+      ws.onopen = () => {
+        document.getElementById('dot').classList.add('on');
+        document.getElementById('conn-label').textContent = 'Terhubung';
+      };
+
+      ws.onclose = () => {
+        document.getElementById('dot').classList.remove('on');
+        document.getElementById('conn-label').textContent = 'Terputus — reconnect…';
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => ws.close();
+
+      ws.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        updateShip(data);
+        msgCount++;
+        document.getElementById('msg-count').textContent = msgCount;
+        document.getElementById('last-update').textContent =
+          '⏱ ' + new Date().toLocaleTimeString('id-ID');
+      };
+    }
+
+    connect();
+  </script>
+</body>
+</html>

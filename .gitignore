@@ -1,0 +1,6 @@
+*.pdf
+*.csv
+ais_peta.html
+__pycache__/
+*.pyc
+.env
