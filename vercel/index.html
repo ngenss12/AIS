@@ -97,7 +97,7 @@
 
 <script>
 // ── CONFIG ───────────────────────────────────────────────────────
-const AIS_KEY     = "cadc1da33463ea00ff85c0c1d8506ce3b8a57fcd";
+let AIS_KEY = "";
 const AIS_REGIONS = [
   [[-8.0, 105.0], [-4.0, 116.0]],
   [[1.0,  99.0],  [6.0, 104.0]],
@@ -355,7 +355,10 @@ setInterval(() => {
 
 // ── INIT ─────────────────────────────────────────────────────────
 setLegend('aisstream');
-connectAIS();
+fetch('/api/config')
+  .then(r => r.json())
+  .then(cfg => { AIS_KEY = cfg.ais_key; connectAIS(); })
+  .catch(() => { AIS_KEY = ""; connectAIS(); });
 </script>
 </body>
 </html>
