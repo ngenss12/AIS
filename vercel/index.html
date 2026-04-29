@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <title>AIS Indonesia — Realtime</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#0d1117; font-family:'Segoe UI',sans-serif; color:#cdd9e5; }
+    #map { width:100vw; height:100vh; }
+
+    #topbar {
+      position:fixed; top:12px; left:50%; transform:translateX(-50%);
+      display:flex; gap:10px; align-items:center;
+      background:rgba(13,17,23,0.9); border:1px solid #30363d;
+      padding:7px 16px; border-radius:999px; font-size:13px;
+      z-index:1000; backdrop-filter:blur(6px); white-space:nowrap;
+    }
+    .sep { color:#444; }
+
+    .src-btn {
+      padding:4px 12px; border-radius:999px; border:1px solid #30363d;
+      cursor:pointer; font-size:12px; font-weight:600;
+      background:transparent; color:#8b949e; transition:.2s;
+    }
+    .src-btn:hover { border-color:#58a6ff; color:#58a6ff; }
+    .src-btn.active-ais { background:#1f3a5c; border-color:#58a6ff; color:#58a6ff; }
+    .src-btn.active-gfw { background:#1f3a1f; border-color:#3fb950; color:#3fb950; }
+
+    #dot {
+      width:8px; height:8px; border-radius:50%;
+      background:#f85149; display:inline-block; margin-right:5px;
+      transition:background .3s;
+    }
+    #dot.on { background:#3fb950; animation:blink 1.4s infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+    #legend {
+      position:fixed; bottom:20px; left:14px;
+      background:rgba(13,17,23,0.9); border:1px solid #30363d;
+      padding:10px 14px; border-radius:10px; font-size:12px;
+      z-index:1000; backdrop-filter:blur(6px); line-height:1.9;
+      min-width:170px;
+    }
+    #legend b { display:block; margin-bottom:3px; font-size:13px; }
+
+    #loading {
+      position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+      background:rgba(13,17,23,0.92); border:1px solid #30363d;
+      padding:20px 32px; border-radius:12px; font-size:14px;
+      z-index:2000; display:none; text-align:center;
+    }
+    #loading .spin {
+      width:28px; height:28px; border:3px solid #30363d;
+      border-top-color:#3fb950; border-radius:50%;
+      animation:spin .8s linear infinite; margin:0 auto 10px;
+    }
+    @keyframes spin { to{transform:rotate(360deg)} }
+
+    .leaflet-popup-content-wrapper {
+      background:#161b22; color:#cdd9e5;
+      border:1px solid #30363d; border-radius:8px;
+    }
+    .leaflet-popup-tip { background:#161b22; }
+    .leaflet-popup-content { font-size:13px; line-height:1.7; }
+    .leaflet-popup-content b { color:#58a6ff; font-size:14px; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="topbar">
+  <button class="src-btn active-ais" id="btn-ais" onclick="switchSource('aisstream')">● AISStream Live</button>
+  <button class="src-btn"            id="btn-gfw" onclick="switchSource('gfw')">● GFW Events</button>
+  <select id="gfw-days" onchange="setGfwDays(this.value)"
+    style="display:none;padding:4px 8px;border-radius:999px;border:1px solid #3fb950;
+      background:#1f3a1f;color:#3fb950;font-size:12px;font-weight:600;cursor:pointer;">
+    <option value="1">1 hari</option>
+    <option value="3">3 hari</option>
+    <option value="7" selected>7 hari</option>
+    <option value="14">14 hari</option>
+    <option value="30">30 hari</option>
+  </select>
+  <span class="sep">|</span>
+  <span><span id="dot"></span><span id="conn-label">Menghubungkan…</span></span>
+  <span class="sep">|</span>
+  <span>🚢 <b id="ship-count">0</b></span>
+  <span class="sep">|</span>
+  <span>📡 <b id="msg-count">0</b></span>
+  <span class="sep">|</span>
+  <span id="last-update" style="color:#8b949e">—</span>
+</div>
+
+<div id="legend"></div>
+<div id="loading"><div class="spin"></div>Mengambil data GFW…</div>
+
+<script>
+// ── CONFIG ───────────────────────────────────────────────────────
+const AIS_KEY     = "cadc1da33463ea00ff85c0c1d8506ce3b8a57fcd";
+const AIS_REGIONS = [
+  [[-8.0, 105.0], [-4.0, 116.0]],
+  [[1.0,  99.0],  [6.0, 104.0]],
+  [[-8.0, 112.0], [-6.5, 113.5]],
+];
+
+// ── MAP ──────────────────────────────────────────────────────────
+const map = L.map('map', { zoomControl:false }).setView([-2.5, 117.0], 5);
+L.control.zoom({ position:'bottomright' }).addTo(map);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution:'&copy; OSM &copy; CARTO', subdomains:'abcd', maxZoom:19
+}).addTo(map);
+
+// ── STATE ────────────────────────────────────────────────────────
+const ships = {};
+let msgCount = 0;
+let activeSource = 'aisstream';
+let aisWs = null;
+
+// ── LEGENDS ──────────────────────────────────────────────────────
+const LEGENDS = {
+  aisstream: `
+    <b>Kecepatan Kapal</b>
+    <div><span style="color:#f85149">▲</span> Berhenti (&lt;1 kn)</div>
+    <div><span style="color:#f0883e">▲</span> Lambat (1–5 kn)</div>
+    <div><span style="color:#58a6ff">▲</span> Normal (5–12 kn)</div>
+    <div><span style="color:#3fb950">▲</span> Cepat (&gt;12 kn)</div>
+    <div><span style="color:#8b949e">▲</span> Tidak diketahui</div>`,
+  gfw: `
+    <b>Tipe Event GFW</b>
+    <div><span style="color:#3fb950">●</span> Fishing (memancing)</div>
+    <div><span style="color:#f0883e">●</span> Encounter (pertemuan)</div>
+    <div><span style="color:#f8e12d">●</span> Loitering (berkeliaran)</div>
+    <div><span style="color:#8b949e">●</span> Lainnya</div>
+    <div style="margin-top:6px;color:#8b949e;font-size:11px">Data <span id="legend-days">7</span> hari terakhir</div>`
+};
+
+function setLegend(src) {
+  document.getElementById('legend').innerHTML = LEGENDS[src];
+}
+
+// ── ICONS ────────────────────────────────────────────────────────
+function aisColor(speed) {
+  if (speed == null) return '#8b949e';
+  if (speed < 1)     return '#f85149';
+  if (speed < 5)     return '#f0883e';
+  if (speed < 12)    return '#58a6ff';
+  return '#3fb950';
+}
+
+function gfwColor(type) {
+  switch ((type || '').toUpperCase()) {
+    case 'FISHING':   return '#3fb950';
+    case 'ENCOUNTER': return '#f0883e';
+    case 'LOITERING': return '#f8e12d';
+    default:          return '#8b949e';
+  }
+}
+
+function makeAisIcon(speed, angle) {
+  const color = aisColor(speed);
+  const rot   = (angle != null && angle < 360) ? angle : 0;
+  return L.divIcon({
+    className: '',
+    html: `<div style="width:0;height:0;border-left:5px solid transparent;
+      border-right:5px solid transparent;border-bottom:13px solid ${color};
+      transform:rotate(${rot}deg);filter:drop-shadow(0 0 4px ${color}88)"></div>`,
+    iconSize:[10,13], iconAnchor:[5,6],
+  });
+}
+
+function makeGfwIcon(type) {
+  const color = gfwColor(type);
+  return L.divIcon({
+    className: '',
+    html: `<div style="width:12px;height:12px;border-radius:50%;background:${color};
+      border:2px solid #0d1117;box-shadow:0 0 6px ${color}88"></div>`,
+    iconSize:[12,12], iconAnchor:[6,6],
+  });
+}
+
+// ── POPUPS ───────────────────────────────────────────────────────
+function aisPopup(d) {
+  return `<b>🚢 ${d.ship_name}</b><br>
+    <span style="color:#8b949e;font-size:11px">MMSI: ${d.mmsi || '—'}</span><br>
+    Kecepatan : <b>${d.speed ?? '—'} kn</b><br>
+    Course    : ${d.course ?? '—'}°<br>
+    Tujuan    : ${d.destination || '—'}<br>
+    Status    : ${d.nav_status ?? '—'}<br>
+    <span style="color:#8b949e;font-size:11px">${d.waktu || ''}</span>`;
+}
+
+function gfwPopup(d) {
+  const dur = d.duration_min ? `${Math.round(d.duration_min / 60)} jam` : '—';
+  return `<b>🚢 ${d.ship_name}</b><br>
+    <span style="color:#8b949e;font-size:11px">MMSI: ${d.mmsi || '—'} | Flag: ${d.flag || '—'}</span><br>
+    Event     : <b style="color:${gfwColor(d.event_type)}">${d.event_type}</b><br>
+    Durasi    : ${dur}<br>
+    Mulai     : ${d.waktu ? new Date(d.waktu).toLocaleString('id-ID') : '—'}<br>
+    Selesai   : ${d.end ? new Date(d.end).toLocaleString('id-ID') : '—'}<br>
+    <span style="color:#8b949e;font-size:11px">${d.event_id || ''}</span>`;
+}
+
+// ── SHIP UPDATE ───────────────────────────────────────────────────
+function processShip(d) {
+  const { lat, lon } = d;
+  if (!lat || !lon) return;
+  const key = d.source === 'gfw' ? (d.event_id || d.mmsi) : d.mmsi;
+  if (!key) return;
+
+  const icon  = d.source === 'gfw'
+    ? makeGfwIcon(d.event_type)
+    : makeAisIcon(d.speed, d.heading < 511 ? d.heading : d.course);
+  const popup = d.source === 'gfw' ? gfwPopup(d) : aisPopup(d);
+
+  if (ships[key]) {
+    ships[key].marker.setLatLng([lat, lon]).setIcon(icon);
+    if (!ships[key].marker.isPopupOpen())
+      ships[key].marker.bindPopup(popup, { maxWidth:260 });
+    ships[key].lastSeen = Date.now();
+  } else {
+    ships[key] = {
+      marker:   L.marker([lat, lon], { icon }).bindPopup(popup, { maxWidth:260 }).addTo(map),
+      lastSeen: Date.now(),
+    };
+  }
+
+  msgCount++;
+  document.getElementById('ship-count').textContent = Object.keys(ships).length;
+  document.getElementById('msg-count').textContent  = msgCount;
+  document.getElementById('last-update').textContent = '⏱ ' + new Date().toLocaleTimeString('id-ID');
+}
+
+function clearMarkers() {
+  for (const s of Object.values(ships)) map.removeLayer(s.marker);
+  for (const k in ships) delete ships[k];
+  msgCount = 0;
+  document.getElementById('ship-count').textContent = '0';
+  document.getElementById('msg-count').textContent  = '0';
+}
+
+// ── AIS PARSER ───────────────────────────────────────────────────
+function parseAIS(msg) {
+  const msgType = msg.MessageType;
+  const meta    = msg.MetaData || {};
+  const lat = meta.latitude, lon = meta.longitude;
+  if (!lat || !lon) return null;
+  const d = {
+    source:    'aisstream',
+    mmsi:      meta.MMSI,
+    ship_name: (meta.ShipName || 'Unknown').trim(),
+    lat, lon,
+    waktu:     meta.time_utc,
+    speed: null, course: null, heading: null, nav_status: null, destination: null,
+  };
+  if (msgType === 'PositionReport') {
+    const pr = (msg.Message || {}).PositionReport || {};
+    d.speed      = pr.Sog;
+    d.course     = pr.Cog;
+    d.heading    = pr.TrueHeading;
+    d.nav_status = pr.NavigationalStatus;
+  } else if (msgType === 'ShipStaticData') {
+    const sd = (msg.Message || {}).ShipStaticData || {};
+    d.destination = (sd.Destination || '').trim();
+  }
+  return d;
+}
+
+// ── AIS WEBSOCKET ────────────────────────────────────────────────
+function connectAIS() {
+  if (aisWs) { aisWs.onclose = null; aisWs.close(); aisWs = null; }
+  aisWs = new WebSocket('wss://stream.aisstream.io/v0/stream');
+
+  aisWs.onopen = () => {
+    aisWs.send(JSON.stringify({
+      APIKey: AIS_KEY,
+      BoundingBoxes: AIS_REGIONS,
+      FilterMessageTypes: ['PositionReport', 'ShipStaticData'],
+    }));
+    setStatus(true, 'AISStream Live');
+  };
+
+  aisWs.onmessage = (e) => {
+    if (activeSource !== 'aisstream') return;
+    const parsed = parseAIS(JSON.parse(e.data));
+    if (parsed) processShip(parsed);
+  };
+
+  aisWs.onclose = () => {
+    setStatus(false, 'Terputus — reconnect…');
+    if (activeSource === 'aisstream') setTimeout(connectAIS, 3000);
+  };
+
+  aisWs.onerror = () => aisWs.close();
+}
+
+// ── GFW FETCH ────────────────────────────────────────────────────
+async function loadGFW() {
+  document.getElementById('loading').style.display = 'block';
+  setStatus(false, 'Mengambil data GFW…');
+  const days = document.getElementById('gfw-days').value || 7;
+  try {
+    const resp    = await fetch(`/api/gfw?days=${days}`);
+    const entries = await resp.json();
+    if (!Array.isArray(entries)) throw new Error(entries.error || 'Format tidak valid');
+    for (const e of entries) processShip(e);
+    setStatus(true, `GFW: ${entries.length} events`);
+  } catch (err) {
+    setStatus(false, 'GFW error: ' + err.message);
+  }
+  document.getElementById('loading').style.display = 'none';
+}
+
+// ── SOURCE SWITCH ────────────────────────────────────────────────
+function switchSource(src) {
+  if (src === activeSource) return;
+  activeSource = src;
+  clearMarkers();
+  setLegend(src);
+  document.getElementById('btn-ais').className = 'src-btn' + (src === 'aisstream' ? ' active-ais' : '');
+  document.getElementById('btn-gfw').className = 'src-btn' + (src === 'gfw'       ? ' active-gfw' : '');
+
+  document.getElementById('gfw-days').style.display = src === 'gfw' ? 'inline-block' : 'none';
+
+  if (src === 'aisstream') {
+    connectAIS();
+  } else {
+    if (aisWs) { aisWs.onclose = null; aisWs.close(); aisWs = null; }
+    loadGFW();
+  }
+}
+
+function setGfwDays(days) {
+  const el = document.getElementById('legend-days');
+  if (el) el.textContent = days;
+  clearMarkers();
+  loadGFW();
+}
+
+// ── UI HELPERS ───────────────────────────────────────────────────
+function setStatus(online, label) {
+  document.getElementById('dot').classList.toggle('on', online);
+  document.getElementById('conn-label').textContent = label;
+}
+
+// Auto-remove AIS kapal tidak aktif 10 menit
+setInterval(() => {
+  if (activeSource !== 'aisstream') return;
+  const cut = Date.now() - 10 * 60 * 1000;
+  for (const [k, s] of Object.entries(ships)) {
+    if (s.lastSeen < cut) { map.removeLayer(s.marker); delete ships[k]; }
+  }
+  document.getElementById('ship-count').textContent = Object.keys(ships).length;
+}, 60_000);
+
+// ── INIT ─────────────────────────────────────────────────────────
+setLegend('aisstream');
+connectAIS();
+</script>
+</body>
+</html>

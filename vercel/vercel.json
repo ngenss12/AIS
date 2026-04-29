@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/api/gfw", "destination": "/api/gfw.py" },
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ]
+}
