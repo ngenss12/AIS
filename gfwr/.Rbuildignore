@@ -1,0 +1,16 @@
+^gfwr\.Rproj$
+^\.Rproj\.user$
+^README\.Rmd$
+^LICENSE\.md$
+CodeOfConduct.md
+Contributing.md
+docs/
+pkgdown
+data-raw
+^gfwr\.Rcheck$
+^gfwr.*\.tar\.gz$
+^gfwr.*\.tgz$
+^data-raw$
+vignettes
+R/get_sar_infraes.R
+^vignettes/articles$
